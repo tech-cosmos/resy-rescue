@@ -1,9 +1,11 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Snapshot } from "@/lib/actions";
-import type { Reservation } from "@/lib/types";
+import type { EmailOutcome, RebuildPhase, Reservation } from "@/lib/types";
 import { fmt12 } from "@/lib/time";
+import GmailMark from "./GmailMark";
 
 async function post(path: string, body?: unknown): Promise<Snapshot> {
   const res = await fetch(path, {
@@ -14,28 +16,58 @@ async function post(path: string, body?: unknown): Promise<Snapshot> {
   return res.json();
 }
 
+const REBUILDING: RebuildPhase[] = ["fetching", "reading"];
+
 export default function Dashboard() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [activePhone, setActivePhone] = useState<string | null>(null);
+  const rebuildingRef = useRef(false);
 
+  // Poll fast while the inbox is being rebuilt so each email shows up as it's processed.
   useEffect(() => {
     let alive = true;
-    const tick = () =>
-      fetch("/api/state", { cache: "no-store" })
-        .then((res) => res.json())
-        .then((data: Snapshot) => alive && setSnap(data))
-        .catch(() => {});
-    tick();
-    const t = setInterval(tick, 1200);
+    let timer: ReturnType<typeof setTimeout>;
+
+    // Arriving from the landing page's "Connect Gmail" reads the inbox straight away (unless a read is already running).
+    let autoStart = new URL(window.location.href).searchParams.get("connected") === "gmail";
+    const startRebuild = async () => {
+      setBusy("rebuild");
+      rebuildingRef.current = true;
+      try {
+        const data = await post("/api/rebuild");
+        if (alive) setSnap(data);
+      } finally {
+        if (alive) setBusy(null);
+      }
+    };
+
+    const tick = async () => {
+      try {
+        const data: Snapshot = await (await fetch("/api/state", { cache: "no-store" })).json();
+        if (!alive) return;
+        rebuildingRef.current = REBUILDING.includes(data.rebuild.phase);
+        setSnap(data);
+        if (autoStart) {
+          autoStart = false;
+          const url = new URL(window.location.href);
+          url.searchParams.delete("connected");
+          window.history.replaceState(null, "", url);
+          if (!REBUILDING.includes(data.rebuild.phase)) void startRebuild();
+        }
+      } catch {}
+      if (alive) timer = setTimeout(tick, rebuildingRef.current ? 200 : 1200);
+    };
+    void tick();
     return () => {
       alive = false;
-      clearInterval(t);
+      clearTimeout(timer);
     };
   }, []);
 
   const run = async (label: string, path: string) => {
     setBusy(label);
+    if (label === "rebuild") rebuildingRef.current = true;
     try {
       setSnap(await post(path));
     } finally {
@@ -44,6 +76,8 @@ export default function Dashboard() {
   };
 
   if (!snap) return <div className="p-10 text-stone-500">Loading…</div>;
+
+  const rebuilding = busy === "rebuild" || REBUILDING.includes(snap.rebuild.phase);
 
   const live = snap.reservations.filter((r) => r.status !== "cancelled");
   const stats = {
@@ -60,14 +94,26 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-stone-100 text-stone-900">
       <header className="border-b border-stone-200 bg-white">
-        <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
-          <div>
-            <h1 className="text-xl font-semibold tracking-tight">{snap.restaurant} · Tonight&apos;s Book</h1>
-            <p className="text-sm text-stone-500">
-              {new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
-            </p>
+        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
+          <div className="flex items-center gap-4">
+            <Link href="/" className="font-display text-2xl leading-none tracking-tight text-stone-900 hover:text-[#c8402a]">
+              Resy <em>Rescue</em>
+            </Link>
+            <span className="h-8 w-px bg-stone-200" />
+            <div>
+              <h1 className="text-xl font-semibold tracking-tight">{snap.restaurant} · Tonight&apos;s Book</h1>
+              <p className="text-sm text-stone-500">
+                {new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
+              </p>
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span
+              className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1 font-medium text-stone-700 ring-1 ring-stone-200"
+              title="Demo: a sample inbox stands in for Gmail"
+            >
+              <GmailMark className="h-3.5 w-3.5" /> Gmail connected · demo
+            </span>
             <span className="inline-flex items-center gap-2 rounded-full bg-red-50 px-3 py-1 font-medium text-red-700 ring-1 ring-red-200">
               <span className="h-2 w-2 animate-pulse rounded-full bg-red-600" /> Resy offline since {outage}
             </span>
@@ -83,19 +129,22 @@ export default function Dashboard() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1400px] space-y-5 px-4 py-5 sm:px-6">
+      <main className="mx-auto max-w-[1600px] space-y-5 px-4 py-5 sm:px-6">
         <section className="grid gap-3 md:grid-cols-3">
           <Step
             n={1}
             title="Rebuild from inbox"
             detail={
-              snap.rebuiltAt
-                ? `${snap.inboxCount} emails parsed by ${snap.extractedBy}`
-                : "Read Resy notification emails to recover tonight's bookings"
+              rebuilding
+                ? rebuildStatus(snap)
+                : snap.rebuiltAt
+                  ? `${snap.inboxCount} emails parsed by ${snap.extractedBy}`
+                  : "Read Resy notification emails to recover tonight's bookings"
             }
-            done={!!snap.rebuiltAt}
-            action={busy === "rebuild" ? "Reading inbox…" : snap.rebuiltAt ? "Rebuild again" : "Rebuild book"}
-            disabled={!!busy}
+            done={!!snap.rebuiltAt && !rebuilding}
+            progress={rebuilding ? rebuildProgress(snap) : undefined}
+            action={rebuilding ? "Rebuilding…" : snap.rebuiltAt ? "Rebuild again" : "Rebuild book"}
+            disabled={!!busy || rebuilding}
             onClick={() => run("rebuild", "/api/rebuild")}
           />
           <Step
@@ -104,7 +153,7 @@ export default function Dashboard() {
             detail={stats.untexted ? `${stats.untexted} guests haven't been contacted` : "Ask each guest to reply YES, CANCEL, or a change"}
             done={!!snap.rebuiltAt && stats.untexted === 0}
             action={`Send ${stats.untexted || ""} confirmations`.replace("  ", " ")}
-            disabled={!!busy || !snap.rebuiltAt || stats.untexted === 0}
+            disabled={!!busy || rebuilding || !snap.rebuiltAt || stats.untexted === 0}
             onClick={() => run("confirm", "/api/confirm")}
           />
           <Step
@@ -113,7 +162,7 @@ export default function Dashboard() {
             detail={stats.awaiting ? `${stats.awaiting} awaiting a reply` : "Replies update the book live"}
             done={!!snap.rebuiltAt && stats.awaiting === 0 && stats.untexted === 0}
             action="Simulate guest replies"
-            disabled={!!busy || stats.awaiting === 0}
+            disabled={!!busy || rebuilding || stats.awaiting === 0}
             onClick={() => run("simulate", "/api/simulate")}
           />
         </section>
@@ -133,16 +182,18 @@ export default function Dashboard() {
           </div>
         )}
 
-        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_380px]">
+        <div className="grid gap-5 lg:grid-cols-[320px_minmax(0,1fr)] xl:grid-cols-[320px_minmax(0,1fr)_360px]">
+          <Inbox snap={snap} rebuilding={rebuilding} />
           <div className="min-w-0 space-y-5">
             <ReservationTable
               reservations={snap.reservations}
+              rebuilding={rebuilding}
               activePhone={activePhone}
               onSelect={(r) => r.phone && setActivePhone(r.phone)}
             />
             <AvailabilityGrid grid={snap.grid} />
           </div>
-          <div className="space-y-5">
+          <div className="grid content-start gap-5 lg:col-span-2 lg:grid-cols-2 xl:col-span-1 xl:grid-cols-1">
             <Phone snap={snap} activePhone={activePhone} setActivePhone={setActivePhone} onSnap={setSnap} />
             <Activity items={snap.activity} />
           </div>
@@ -164,28 +215,59 @@ export default function Dashboard() {
   );
 }
 
+function rebuildStatus(snap: Snapshot): string {
+  const { phase, phaseAt, cursor, total, read } = snap.rebuild;
+  if (phase === "fetching") return `Fetching emails from Gmail… ${snap.inbox.length} of ${total}`;
+  if (phase === "reading") {
+    const secs = phaseAt ? Math.max(0, Math.floor((Date.now() - phaseAt) / 1000)) : 0;
+    return `Read ${read.filter(Boolean).length} of ${total} · ${cursor + 1} applied to the book · ${secs}s`;
+  }
+  return "Connecting to Gmail…";
+}
+
+/** 0–1 across the whole rebuild: fetching is the first 10%, then reading and applying share the rest. */
+function rebuildProgress(snap: Snapshot): number {
+  const { phase, cursor, read } = snap.rebuild;
+  const total = Math.max(1, snap.rebuild.total);
+  if (phase === "fetching") return 0.1 * (snap.inbox.length / total);
+  if (phase === "reading") return 0.1 + 0.45 * (read.filter(Boolean).length / total) + 0.45 * ((cursor + 1) / total);
+  return 0.02;
+}
+
 function Step(props: {
   n: number;
   title: string;
   detail: string;
   action: string;
   done: boolean;
+  progress?: number;
   disabled: boolean;
   onClick: () => void;
 }) {
+  const active = props.progress !== undefined;
   return (
     <div className="flex flex-col justify-between gap-3 rounded-xl border border-stone-200 bg-white p-4">
       <div className="flex gap-3">
         <span
           className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-sm font-semibold ${
-            props.done ? "bg-emerald-600 text-white" : "bg-stone-900 text-white"
+            props.done ? "bg-emerald-600 text-white" : active ? "animate-pulse bg-[#c8402a] text-white" : "bg-stone-900 text-white"
           }`}
         >
           {props.done ? "✓" : props.n}
         </span>
-        <div>
+        <div className="min-w-0 flex-1">
           <div className="font-medium">{props.title}</div>
-          <div className="text-sm text-stone-500">{props.detail}</div>
+          <div className="truncate text-sm text-stone-500" title={props.detail}>
+            {props.detail}
+          </div>
+          {active && (
+            <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-stone-100">
+              <div
+                className="h-full rounded-full bg-[#c8402a] transition-[width] duration-300 ease-out"
+                style={{ width: `${Math.min(100, props.progress! * 100)}%` }}
+              />
+            </div>
+          )}
         </div>
       </div>
       <button
@@ -231,10 +313,12 @@ function StatusPill({ r }: { r: Reservation }) {
 
 function ReservationTable({
   reservations,
+  rebuilding,
   activePhone,
   onSelect,
 }: {
   reservations: Reservation[];
+  rebuilding: boolean;
   activePhone: string | null;
   onSelect: (r: Reservation) => void;
 }) {
@@ -246,7 +330,13 @@ function ReservationTable({
       </div>
       {reservations.length === 0 ? (
         <div className="px-4 py-12 text-center text-sm text-stone-500">
-          Resy is down and the book is empty. Start with <strong>Rebuild book</strong>.
+          {rebuilding ? (
+            "Bookings will appear here as each email is applied…"
+          ) : (
+            <>
+              Resy is down and the book is empty. Start with <strong>Rebuild book</strong>.
+            </>
+          )}
         </div>
       ) : (
         <div className="overflow-x-auto">
@@ -267,7 +357,7 @@ function ReservationTable({
                   key={r.id}
                   onClick={() => onSelect(r)}
                   title={r.history.join("\n")}
-                  className={`cursor-pointer hover:bg-stone-50 ${r.status === "cancelled" ? "text-stone-400" : ""} ${
+                  className={`animate-row-in cursor-pointer hover:bg-stone-50 ${r.status === "cancelled" ? "text-stone-400" : ""} ${
                     activePhone && r.phone === activePhone ? "bg-violet-50/60" : ""
                   }`}
                 >
@@ -463,6 +553,121 @@ function Phone({
       </div>
     </section>
   );
+}
+
+const OUTCOME: Record<EmailOutcome["kind"], { tag: string; cls: string }> = {
+  booking: { tag: "New booking", cls: "bg-emerald-50 text-emerald-700 ring-emerald-200" },
+  update: { tag: "Changed", cls: "bg-sky-50 text-sky-700 ring-sky-200" },
+  cancel: { tag: "Cancelled", cls: "bg-red-50 text-red-700 ring-red-200" },
+  later: { tag: "Not tonight", cls: "bg-stone-100 text-stone-500 ring-stone-200" },
+  skip: { tag: "Skipped", cls: "bg-stone-100 text-stone-500 ring-stone-200" },
+  review: { tag: "Needs review", cls: "bg-amber-50 text-amber-800 ring-amber-300" },
+};
+
+function Inbox({ snap, rebuilding }: { snap: Snapshot; rebuilding: boolean }) {
+  const { phase, cursor, read, outcomes } = snap.rebuild;
+  const [open, setOpen] = useState<number | null>(null);
+  const list = useRef<HTMLUListElement>(null);
+
+  // Follow the rebuild: the newest email while fetching, then the email being applied. Scrolls only the list.
+  useEffect(() => {
+    const el = list.current;
+    if (!el || !rebuilding) return;
+    const row = el.querySelector<HTMLElement>(`[data-index="${phase === "fetching" ? snap.inbox.length - 1 : cursor}"]`);
+    const top = row ? row.offsetTop - el.clientHeight / 2 + row.clientHeight / 2 : 0;
+    el.scrollTo({ top, behavior: "smooth" });
+  }, [cursor, phase, rebuilding, snap.inbox.length]);
+
+  const counts = outcomes.reduce<Partial<Record<EmailOutcome["kind"], number>>>((acc, o) => {
+    if (o) acc[o.kind] = (acc[o.kind] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  return (
+    <section className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-stone-200 bg-white lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:self-start">
+      <div className="border-b border-stone-200 px-4 py-3">
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="flex items-center gap-2 font-semibold">
+            <GmailMark className="h-4 w-4" /> Inbox
+          </h2>
+          <span className="text-xs tabular-nums text-stone-500">{snap.inbox.length} emails</span>
+        </div>
+        <p className="mt-1 text-xs text-stone-500">
+          {phase === "idle" && "Nothing read yet. Rebuild the book to scan for Resy emails."}
+          {phase === "fetching" && "Pulling reservation emails from Gmail…"}
+          {phase === "reading" &&
+            (snap.ai
+              ? `${snap.ai} reads emails in parallel batches. Each is applied in order once read, so later changes win.`
+              : "Parsing Resy notification format, then applying in order so later changes win.")}
+          {phase === "done" && (
+            <>
+              {counts.booking ?? 0} booked · {counts.update ?? 0} changed · {counts.cancel ?? 0} cancelled ·{" "}
+              {(counts.later ?? 0) + (counts.skip ?? 0)} ignored
+              {counts.review ? ` · ${counts.review} need review` : ""}
+            </>
+          )}
+        </p>
+      </div>
+
+      {snap.inbox.length === 0 ? (
+        <div className="px-4 py-12 text-center text-sm text-stone-400">
+          {rebuilding ? "Connecting to Gmail…" : "Inbox not scanned yet."}
+        </div>
+      ) : (
+        <ul ref={list} className="relative min-h-0 flex-1 divide-y divide-stone-100 overflow-y-auto">
+          {snap.inbox.map((email) => {
+            const outcome = outcomes[email.index];
+            const current = phase === "reading" && email.index === cursor;
+            const reading = phase === "reading" && !read[email.index];
+            const waiting = phase === "reading" && read[email.index] && !outcome;
+            return (
+              <li key={email.index} data-index={email.index} className="animate-row-in">
+                <button
+                  onClick={() => setOpen(open === email.index ? null : email.index)}
+                  className={`block w-full px-4 py-2.5 text-left transition-colors hover:bg-stone-50 ${
+                    current ? "bg-[#c8402a]/[0.06] shadow-[inset_3px_0_0_#c8402a]" : ""
+                  } ${reading ? "reading-row" : ""}`}
+                >
+                  <div className="flex items-center gap-2 text-xs text-stone-500">
+                    <EmailDot outcome={outcome} current={current} />
+                    <span className="truncate">{email.from === "notifications@resy.com" ? "Resy" : email.from}</span>
+                    <span className="ml-auto shrink-0 tabular-nums text-stone-400">#{email.index}</span>
+                  </div>
+                  <div className="mt-0.5 truncate text-sm text-stone-800">{email.subject}</div>
+                  {(reading || waiting) && (
+                    <div className="mt-1 text-xs text-stone-400">{reading ? "Reading…" : "Read · waiting its turn"}</div>
+                  )}
+                  {outcome && (
+                    <div className="mt-1 flex animate-row-in items-center gap-1.5 text-xs">
+                      <span className={`shrink-0 rounded-full px-1.5 py-px font-medium ring-1 ${OUTCOME[outcome.kind].cls}`}>
+                        {OUTCOME[outcome.kind].tag}
+                      </span>
+                      <span className="truncate text-stone-500">{outcome.label}</span>
+                    </div>
+                  )}
+                </button>
+                {open === email.index && (
+                  <pre className="mx-4 mb-3 whitespace-pre-wrap rounded-lg bg-stone-50 px-3 py-2 font-mono text-[11px] leading-relaxed text-stone-600">
+                    {email.body}
+                  </pre>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function EmailDot({ outcome, current }: { outcome: EmailOutcome | null | undefined; current: boolean }) {
+  if (current) return <span className="h-2 w-2 shrink-0 animate-ping rounded-full bg-[#c8402a]" />;
+  const color = !outcome
+    ? "bg-transparent ring-1 ring-stone-300"
+    : { booking: "bg-emerald-500", update: "bg-sky-500", cancel: "bg-red-500", later: "bg-stone-300", skip: "bg-stone-300", review: "bg-amber-500" }[
+        outcome.kind
+      ];
+  return <span className={`h-2 w-2 shrink-0 rounded-full ${color}`} />;
 }
 
 const DOT = { info: "bg-stone-400", good: "bg-emerald-500", warn: "bg-amber-500", ai: "bg-violet-500" };

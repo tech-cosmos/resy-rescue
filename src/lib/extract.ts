@@ -2,7 +2,6 @@ import { z } from "zod";
 import type { InboxEmail, Reservation, ResyEvent } from "./types";
 import { llm, MODEL, stripFences } from "./llm";
 import { normalizePhone, parseTime, todayISO } from "./time";
-import { uid } from "./store";
 
 const EventSchema = z.object({
   type: z.enum(["new", "modified", "cancelled"]),
@@ -27,17 +26,31 @@ function jsonSchema(schema: z.ZodType): Record<string, unknown> {
   return rest;
 }
 
-export type ExtractionResult = { events: ResyEvent[]; needsReview: string[]; extractedBy: string };
+/** An email that produced no event. `review` marks ones a human should read (free-form guest emails). */
+export type SkippedEmail = { emailIndex: number; reason: string; review?: boolean };
+export type ExtractionResult = { events: ResyEvent[]; skipped: SkippedEmail[]; extractedBy: string };
 
-export async function extractEvents(inbox: InboxEmail[], now = new Date()): Promise<ExtractionResult> {
-  if (llm) {
-    try {
-      return await extractWithLLM(inbox, now);
-    } catch (err) {
-      console.error("LLM extraction failed, falling back to rules:", err);
-    }
+// One LLM call over the whole inbox takes ~30s; small parallel batches come back in a few seconds
+// each, so the book can start filling while later emails are still being read.
+const BATCH_SIZE = 5;
+
+/** Starts extracting every email at once. Returns one promise per email (shared by its batch), in inbox order. */
+export function extractInBatches(inbox: InboxEmail[], now = new Date()): Promise<ExtractionResult>[] {
+  if (!llm) {
+    const all = Promise.resolve(extractWithRules(inbox));
+    return inbox.map(() => all);
   }
-  return extractWithRules(inbox);
+  const batches: Promise<ExtractionResult>[] = [];
+  for (let i = 0; i < inbox.length; i += BATCH_SIZE) {
+    const batch = inbox.slice(i, i + BATCH_SIZE);
+    batches.push(
+      extractWithLLM(batch, now).catch((err) => {
+        console.error("LLM extraction failed, falling back to rules for this batch:", err);
+        return extractWithRules(batch);
+      }),
+    );
+  }
+  return inbox.map((_, i) => batches[Math.floor(i / BATCH_SIZE)]);
 }
 
 async function extractWithLLM(inbox: InboxEmail[], now: Date): Promise<ExtractionResult> {
@@ -55,7 +68,7 @@ async function extractWithLLM(inbox: InboxEmail[], now: Date): Promise<Extractio
       {
         role: "system",
         content:
-          "You reconstruct a restaurant's reservation book from its email inbox while the booking system is offline. " +
+          "You help reconstruct a restaurant's reservation book from emails in its inbox while the booking system is offline. " +
           "For every email that creates, modifies, or cancels a reservation, emit one event. This includes informal emails " +
           "forwarded by guests that mention a booking (treat those as type 'new'). Skip newsletters and anything else, listing them in 'skipped'.\n" +
           `Today is ${now.toDateString()} (${todayISO(now)}). Output dates as YYYY-MM-DD and times as 24h HH:MM. ` +
@@ -70,7 +83,7 @@ async function extractWithLLM(inbox: InboxEmail[], now: Date): Promise<Extractio
   const parsed = ExtractionSchema.parse(JSON.parse(stripFences(raw)));
   return {
     events: parsed.events.map((e) => ({ ...e, time: e.time ? parseTime(e.time) ?? e.time : null })),
-    needsReview: [],
+    skipped: parsed.skipped,
     extractedBy: MODEL,
   };
 }
@@ -78,20 +91,25 @@ async function extractWithLLM(inbox: InboxEmail[], now: Date): Promise<Extractio
 /** Deterministic fallback: understands Resy's notification format, nothing else. */
 export function extractWithRules(inbox: InboxEmail[]): ExtractionResult {
   const events: ResyEvent[] = [];
-  const needsReview: string[] = [];
+  const skipped: SkippedEmail[] = [];
   const field = (body: string, label: string) => body.match(new RegExp(`^${label}:\\s*(.+)$`, "mi"))?.[1]?.trim() ?? null;
 
   for (const email of inbox) {
     if (email.from !== "notifications@resy.com") {
       if (/reserv|booking|tonight|table/i.test(email.subject + email.body) && !/digest/i.test(email.subject)) {
-        needsReview.push(`"${email.subject}" from ${email.from}`);
+        skipped.push({ emailIndex: email.index, reason: "Free-form email, rules can't read it", review: true });
+      } else {
+        skipped.push({ emailIndex: email.index, reason: "Not a reservation" });
       }
       continue;
     }
     const type = /cancel/i.test(email.subject) ? "cancelled" : /updated|modified/i.test(email.subject) ? "modified" : "new";
     const confirmation = field(email.body, "Confirmation #");
     const name = field(email.body, "Guest");
-    if (!confirmation || !name) continue;
+    if (!confirmation || !name) {
+      skipped.push({ emailIndex: email.index, reason: "Missing guest or confirmation #", review: true });
+      continue;
+    }
 
     const dateStr = field(email.body, "Date");
     const date = dateStr ? todayISO(new Date(dateStr.replace(/^\w+,\s*/, ""))) : null;
@@ -110,7 +128,7 @@ export function extractWithRules(inbox: InboxEmail[]): ExtractionResult {
       emailIndex: email.index,
     });
   }
-  return { events, needsReview, extractedBy: "rules (no OPENROUTER_API_KEY)" };
+  return { events, skipped, extractedBy: "rules (no OPENROUTER_API_KEY)" };
 }
 
 /** Replay events in inbox order, so later updates and cancellations win. Keeps tonight's bookings only. */
@@ -123,7 +141,7 @@ export function reconcile(events: ResyEvent[], now = new Date()): Reservation[] 
     if (e.type === "new" || !existing) {
       if (e.type === "cancelled" && !existing) continue;
       byConf.set(e.confirmation, {
-        id: uid("r"),
+        id: `r_${e.confirmation}`, // stable across partial replays so rows don't remount as the book fills
         confirmation: e.confirmation,
         name: e.name,
         phone: normalizePhone(e.phone),

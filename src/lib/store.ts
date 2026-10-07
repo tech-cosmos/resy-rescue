@@ -1,4 +1,4 @@
-import type { ActivityItem, InboxEmail, Reservation, SmsMessage } from "./types";
+import type { ActivityItem, InboxEmail, RebuildProgress, Reservation, SmsMessage } from "./types";
 
 // In-memory state for the demo. Lives on globalThis so it survives dev hot reloads.
 // Single-process only: swap for a real database before deploying anywhere serverless.
@@ -10,6 +10,7 @@ export type State = {
   rebuiltAt: number | null;
   extractedBy: string | null;
   needsReview: string[];
+  rebuild: RebuildProgress;
   outageSince: number;
 };
 
@@ -26,6 +27,7 @@ export function freshState(): State {
     rebuiltAt: null,
     extractedBy: null,
     needsReview: [],
+    rebuild: { run: 0, phase: "idle", phaseAt: null, total: 0, cursor: -1, read: [], outcomes: [] },
     outageSince: outage.getTime(),
   };
 }

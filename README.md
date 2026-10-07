@@ -9,7 +9,7 @@
 ```bash
 cp .env.example .env.local   # add OPENROUTER_API_KEY (optional)
 npm install
-npm run dev                  # http://localhost:3000
+npm run dev                  # http://localhost:3000 (landing) → /dashboard
 ```
 
 Without a key the app runs in **rules mode**: Resy-format emails and simple texts still work, but free-form emails get flagged for a human.

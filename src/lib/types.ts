@@ -47,3 +47,21 @@ export type InboxEmail = {
   subject: string;
   body: string;
 };
+
+/** What one inbox email turned into, shown next to it in the dashboard's inbox panel. */
+export type EmailOutcome = {
+  kind: "booking" | "update" | "cancel" | "later" | "skip" | "review";
+  label: string;
+};
+
+export type RebuildPhase = "idle" | "fetching" | "reading" | "done";
+
+export type RebuildProgress = {
+  run: number;
+  phase: RebuildPhase;
+  phaseAt: number | null; // when the current phase started
+  total: number; // emails in the inbox being rebuilt
+  cursor: number; // index of the email most recently applied to the book, -1 before any
+  read: boolean[]; // by email index: the extractor has finished with it
+  outcomes: (EmailOutcome | null)[]; // by email index
+};

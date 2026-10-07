@@ -3,8 +3,84 @@
 @theme inline {
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-instrument-serif);
+  --animate-row-in: row-in 420ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
 body {
   font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+@keyframes row-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+    background-color: rgb(200 64 42 / 0.08);
+  }
+}
+
+/* Inbox rows the extractor hasn't finished with yet: a light band sweeps across them. */
+.reading-row {
+  background: linear-gradient(100deg, transparent 30%, rgb(200 64 42 / 0.07) 50%, transparent 70%) 0 0 / 300% 100%;
+  animation: reading-row 1.4s linear infinite;
+}
+
+@keyframes reading-row {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
+
+/* Landing page: staggered entrances. Delays are set inline. */
+.rise {
+  animation: rise 800ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.drift {
+  animation: drift 900ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.ink {
+  animation: ink 500ms ease-out both;
+}
+.stamp {
+  animation: stamp 420ms cubic-bezier(0.3, 1.6, 0.5, 1) both;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+}
+@keyframes drift {
+  from {
+    opacity: 0;
+    translate: 0 -18px;
+  }
+}
+@keyframes ink {
+  from {
+    opacity: 0;
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+@keyframes stamp {
+  from {
+    opacity: 0;
+    scale: 1.8;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }

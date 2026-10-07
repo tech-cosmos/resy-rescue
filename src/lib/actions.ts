@@ -1,20 +1,63 @@
 import { buildInbox } from "@/data/inbox";
 import { handleInbound } from "./agent";
 import { slotGrid } from "./capacity";
-import { extractEvents, reconcile } from "./extract";
+import { extractInBatches, reconcile, type SkippedEmail } from "./extract";
 import { llm, MODEL } from "./llm";
 import { log, RESTAURANT, sendSms, state } from "./store";
-import { fmt12 } from "./time";
+import { fmt12, todayISO } from "./time";
+import type { EmailOutcome, RebuildPhase, ResyEvent } from "./types";
+
+// The rebuild is paced so the dashboard (polling /api/state) can show each step:
+// emails arriving, batches being read, then each email being applied to the book in order.
+const FETCH_MS = 45;
+const APPLY_MS = 160;
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function rebuildFromInbox() {
   const s = state();
-  s.inbox = buildInbox();
-  log("info", `Scanning inbox: ${s.inbox.length} emails`);
-  const { events, needsReview, extractedBy } = await extractEvents(s.inbox);
-  s.reservations = reconcile(events);
-  s.needsReview = needsReview;
-  s.extractedBy = extractedBy;
+  const run = s.rebuild.run + 1;
+  // A reset swaps the state object and a newer rebuild bumps `run`; either way this one stops writing.
+  const stale = () => state() !== s || s.rebuild.run !== run;
+  const setPhase = (phase: RebuildPhase) => Object.assign(s.rebuild, { phase, phaseAt: Date.now() });
+
+  const inbox = buildInbox();
+  Object.assign(s, { inbox: [], reservations: [], needsReview: [], extractedBy: null, rebuiltAt: null });
+  s.rebuild = { run, phase: "fetching", phaseAt: Date.now(), total: inbox.length, cursor: -1, read: [], outcomes: [] };
+  log("info", "Gmail connected, fetching reservation emails");
+  for (const email of inbox) {
+    if (stale()) return;
+    s.inbox.push(email);
+    await sleep(FETCH_MS);
+  }
+
+  setPhase("reading");
+  log(llm ? "ai" : "info", llm ? `${MODEL} is reading ${inbox.length} emails` : `Reading ${inbox.length} emails with Resy-format rules`);
+  const results = extractInBatches(inbox);
+  results.forEach((p, i) => void p.then(() => !stale() && (s.rebuild.read[i] = true)));
+
+  // Apply strictly in inbox order (later changes and cancellations must win), each as soon as it's been read.
+  const events: ResyEvent[] = [];
+  const skipped: SkippedEmail[] = [];
+  const extractors = new Set<string>();
+  const today = todayISO();
+  for (const email of inbox) {
+    const result = await results[email.index];
+    if (stale()) return;
+    extractors.add(result.extractedBy);
+    s.extractedBy = [...extractors].join(" + ");
+    const event = result.events.find((e) => e.emailIndex === email.index);
+    const skip = result.skipped.find((x) => x.emailIndex === email.index);
+    if (event) events.push(event);
+    if (skip) skipped.push(skip);
+    s.reservations = reconcile(events);
+    s.rebuild.outcomes[email.index] = describe(event, skip, today);
+    s.rebuild.cursor = email.index;
+    await sleep(APPLY_MS);
+  }
+
+  setPhase("done");
   s.rebuiltAt = Date.now();
+  s.needsReview = skipped.filter((x) => x.review).map((x) => `"${inbox[x.emailIndex]?.subject}" from ${inbox[x.emailIndex]?.from}`);
   const live = s.reservations.filter((r) => r.status !== "cancelled");
   const cancelled = s.reservations.length - live.length;
   log(
@@ -22,7 +65,18 @@ export async function rebuildFromInbox() {
     `Rebuilt tonight's book: ${live.length} bookings, ${live.reduce((n, r) => n + r.partySize, 0)} covers` +
       (cancelled ? `, ${cancelled} cancellations applied` : ""),
   );
-  for (const item of needsReview) log("warn", `Needs review (rules couldn't parse): ${item}`);
+  for (const item of s.needsReview) log("warn", `Needs review (rules couldn't parse): ${item}`);
+}
+
+function describe(event: ResyEvent | undefined, skip: SkippedEmail | undefined, today: string): EmailOutcome {
+  if (!event) {
+    return skip?.review ? { kind: "review", label: skip.reason } : { kind: "skip", label: skip?.reason ?? "Not a reservation" };
+  }
+  const when = [event.partySize && `${event.partySize}`, event.time && `at ${fmt12(event.time)}`].filter(Boolean).join(" ");
+  if (event.type === "cancelled") return { kind: "cancel", label: `${event.name} cancelled` };
+  if (event.type === "modified") return { kind: "update", label: `${event.name} now ${when}` };
+  if (event.date && event.date !== today) return { kind: "later", label: `${event.name} · not tonight` };
+  return { kind: "booking", label: `${event.name}, ${when}` };
 }
 
 export function textAllGuests() {
@@ -80,6 +134,8 @@ export function snapshot() {
     rebuiltAt: s.rebuiltAt,
     extractedBy: s.extractedBy,
     needsReview: s.needsReview,
+    inbox: s.inbox,
+    rebuild: s.rebuild,
     outageSince: s.outageSince,
     inboxCount: s.inbox.length,
     ai: llm ? MODEL : null,
