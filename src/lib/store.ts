@@ -1,4 +1,4 @@
-import type { ActivityItem, InboxEmail, RebuildProgress, Reservation, SmsMessage } from "./types";
+import type { ActivityItem, InboxEmail, RebuildProgress, Reservation, SmsMessage, WaitlistEntry } from "./types";
 
 // In-memory state for the demo. Lives on globalThis so it survives dev hot reloads.
 // Single-process only: swap for a real database before deploying anywhere serverless.
@@ -6,6 +6,7 @@ export type State = {
   inbox: InboxEmail[];
   reservations: Reservation[];
   messages: SmsMessage[];
+  waitlist: WaitlistEntry[];
   activity: ActivityItem[];
   rebuiltAt: number | null;
   extractedBy: string | null;
@@ -23,6 +24,7 @@ export function freshState(): State {
     inbox: [],
     reservations: [],
     messages: [],
+    waitlist: [],
     activity: [],
     rebuiltAt: null,
     extractedBy: null,

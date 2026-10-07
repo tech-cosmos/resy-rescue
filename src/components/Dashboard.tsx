@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Snapshot } from "@/lib/actions";
-import type { EmailOutcome, RebuildPhase, Reservation } from "@/lib/types";
+import type { EmailOutcome, RebuildPhase, Reservation, WaitlistEntry } from "@/lib/types";
 import { fmt12 } from "@/lib/time";
 import GmailMark from "./GmailMark";
 
@@ -88,6 +88,7 @@ export default function Dashboard() {
     untexted: live.filter((r) => r.status === "pending" && !r.contacted).length,
     freed: snap.reservations.filter((r) => r.status === "cancelled" && r.history.some((h) => h.includes("by text"))).length,
     byText: live.filter((r) => r.source === "sms-agent").length,
+    rebooked: live.filter((r) => r.source === "waitlist").length,
   };
   const outage = new Date(snap.outageSince).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 
@@ -172,7 +173,12 @@ export default function Dashboard() {
           <Stat label="Confirmed" value={stats.confirmed} tone="green" />
           <Stat label="Awaiting reply" value={stats.awaiting} tone="amber" sub={stats.awaiting ? "call if no reply by 5pm" : undefined} />
           <Stat label="Not yet texted" value={stats.untexted} />
-          <Stat label="Freed by cancellation" value={stats.freed} tone="red" />
+          <Stat
+            label="Freed by cancellation"
+            value={stats.freed}
+            tone="red"
+            sub={stats.rebooked ? `${stats.rebooked} rebooked from waitlist` : snap.waitlist.some((w) => w.status !== "booked") ? "waitlist ready to rebook" : undefined}
+          />
           <Stat label="Booked by text" value={stats.byText} tone="violet" />
         </section>
 
@@ -192,6 +198,7 @@ export default function Dashboard() {
               onSelect={(r) => r.phone && setActivePhone(r.phone)}
             />
             <AvailabilityGrid grid={snap.grid} />
+            <Waitlist entries={snap.waitlist} />
           </div>
           <div className="grid content-start gap-5 lg:col-span-2 lg:grid-cols-2 xl:col-span-1 xl:grid-cols-1">
             <Phone snap={snap} activePhone={activePhone} setActivePhone={setActivePhone} onSnap={setSnap} />
@@ -369,7 +376,7 @@ function ReservationTable({
                   <td className="px-4 py-2 tabular-nums">{r.partySize}</td>
                   <td className="whitespace-nowrap px-4 py-2 tabular-nums text-stone-500">{r.phone ?? "—"}</td>
                   <td className="whitespace-nowrap px-4 py-2 text-xs text-stone-500">
-                    {r.source === "sms-agent" ? "Text (AI host)" : r.confirmation}
+                    {r.source === "sms-agent" ? "Text (AI host)" : r.source === "waitlist" ? "Waitlist rebook" : r.confirmation}
                   </td>
                   <td className="px-4 py-2">
                     <StatusPill r={r} />
@@ -447,7 +454,10 @@ function Phone({
   const scroller = useRef<HTMLDivElement>(null);
 
   const contacts = useMemo(() => {
-    const names = new Map(snap.reservations.filter((r) => r.phone).map((r) => [r.phone!, r.name]));
+    const names = new Map([
+      ...snap.waitlist.filter((w) => w.name).map((w) => [w.phone, `${w.name} (waitlist)`] as const),
+      ...snap.reservations.filter((r) => r.phone).map((r) => [r.phone!, r.name] as const),
+    ]);
     const phones = new Set([...snap.messages.map((m) => m.phone), ...names.keys()]);
     if (activePhone) phones.add(activePhone);
     return [...phones].map((p) => ({ phone: p, name: names.get(p) ?? "New guest" }));
@@ -512,7 +522,7 @@ function Phone({
             )}
             {activePhone && thread.length === 0 && (
               <p className="pt-24 text-center text-xs text-stone-400">
-                Try: &ldquo;Hi, table for 2 at 8 tonight?&rdquo;
+                Try: &ldquo;Hi, table for 4 at 8 tonight?&rdquo; If it&apos;s full, ask to join the waitlist.
               </p>
             )}
             {thread.map((m) => (
@@ -551,6 +561,43 @@ function Phone({
           </form>
         </div>
       </div>
+    </section>
+  );
+}
+
+const WAIT_STATUS: Record<WaitlistEntry["status"], [string, string]> = {
+  waiting: ["Waiting", "bg-stone-100 text-stone-600 ring-stone-200"],
+  offered: ["Offered · awaiting YES", "bg-amber-50 text-amber-700 ring-amber-200"],
+  booked: ["Rebooked", "bg-emerald-50 text-emerald-700 ring-emerald-200"],
+};
+
+function Waitlist({ entries }: { entries: Snapshot["waitlist"] }) {
+  return (
+    <section className="rounded-xl border border-stone-200 bg-white p-4">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="font-semibold">Waitlist</h2>
+        <span className="text-xs text-stone-500">When a table frees up, everyone who fits is texted. First YES gets it.</span>
+      </div>
+      {entries.length === 0 ? (
+        <p className="text-sm text-stone-400">
+          Nobody waiting. Guests asking for a full time are offered a spot here, then cancel a booking at that time to see the rebook.
+        </p>
+      ) : (
+        <ul className="divide-y divide-stone-100 text-sm">
+          {entries.map((w) => {
+            const [label, cls] = WAIT_STATUS[w.status];
+            return (
+              <li key={w.id} className="flex animate-row-in items-center gap-3 py-2">
+                <span className="w-16 shrink-0 font-medium tabular-nums">{fmt12(w.time)}</span>
+                <span className="min-w-0 flex-1 truncate">
+                  {w.name ?? "Guest"} <span className="text-stone-500">· party of {w.partySize} · {w.phone}</span>
+                </span>
+                <span className={`whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ring-1 ${cls}`}>{label}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </section>
   );
 }

@@ -129,6 +129,7 @@ export function snapshot() {
   return {
     reservations: s.reservations,
     messages: s.messages,
+    waitlist: s.waitlist,
     activity: s.activity.slice(0, 60),
     grid: slotGrid(s.reservations),
     rebuiltAt: s.rebuiltAt,

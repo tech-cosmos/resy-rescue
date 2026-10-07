@@ -21,6 +21,7 @@ Without a key the app runs in **rules mode**: Resy-format emails and simple text
 3. **Send confirmations.** Every guest gets a text.
 4. **Simulate guest replies.** Replies come in: YES confirms, CANCEL frees a table, "push to 8:30?" moves the booking, and the availability grid updates live.
 5. **+ Text as new guest:** "table for 4 at 8 tonight?" 8pm is full, so the AI host offers 7:30, gets a name, and books it.
+6. **Waitlist rebook:** as that new guest, ask to join the waitlist for 8pm (reply WAITLIST in rules mode). Then open Grace Liu's thread (4 at 8:00) and text "cancel". Everyone waitlisted who now fits gets "a table just opened, reply YES". The first YES is booked as a *Waitlist rebook*, and anyone else offered that table is told it's gone and stays on the list.
 
 ## How it works
 
@@ -34,7 +35,7 @@ Without a key the app runs in **rules mode**: Resy-format emails and simple text
 | In-memory state (single process, demo only) | `src/lib/store.ts` |
 | API: `/api/rebuild`, `/api/confirm`, `/api/simulate`, `/api/sms`, `/api/state`, `/api/reset` | `src/app/api/*` |
 
-AI host tools: `get_my_reservation`, `check_availability`, `book_table`, `modify_reservation`, `confirm_reservation`, `cancel_reservation`.
+AI host tools: `get_my_reservation`, `check_availability`, `book_table`, `modify_reservation`, `confirm_reservation`, `cancel_reservation`, `join_waitlist`, `accept_waitlist_offer`.
 
 ## Going real
 

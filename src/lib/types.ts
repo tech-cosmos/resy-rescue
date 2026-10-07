@@ -10,7 +10,7 @@ export type Reservation = {
   notes: string | null;
   status: ReservationStatus;
   contacted: boolean; // we've texted them since Resy went down
-  source: "resy-email" | "sms-agent";
+  source: "resy-email" | "sms-agent" | "waitlist";
   history: string[];
 };
 
@@ -64,4 +64,15 @@ export type RebuildProgress = {
   cursor: number; // index of the email most recently applied to the book, -1 before any
   read: boolean[]; // by email index: the extractor has finished with it
   outcomes: (EmailOutcome | null)[]; // by email index
+};
+
+/** A guest who wanted a time that was full. Freed tables are offered to them by text, first YES wins. */
+export type WaitlistEntry = {
+  id: string;
+  phone: string;
+  name: string | null;
+  partySize: number;
+  time: string; // "HH:MM" 24h
+  status: "waiting" | "offered" | "booked";
+  at: number;
 };
