@@ -1,6 +1,7 @@
 import type OpenAI from "openai";
 import type { Reservation, WaitlistEntry } from "./types";
 import { llm, MODEL } from "./llm";
+import { emailReceipt } from "./mailer";
 import { alternatives, canSeat, FIRST_SEATING, LAST_SEATING } from "./capacity";
 import { findActiveByPhone, log, recordInbound, RESTAURANT, sendSms, state, uid } from "./store";
 import { findTimeInText, fmt12, normalizePhone, parseTime } from "./time";
@@ -42,17 +43,19 @@ export async function handleInbound(rawPhone: string, body: string): Promise<str
 
 // ---- actions shared by the fast path, the rules fallback, and the AI tools ----
 
-function confirm(r: Reservation): string {
+export function confirm(r: Reservation, via = "text"): string {
   r.status = "confirmed";
-  r.history.push("Guest confirmed by text");
-  log("good", `${r.name} confirmed (${r.partySize} @ ${fmt12(r.time)})`);
+  r.history.push(`Guest confirmed by ${via}`);
+  log("good", `${r.name} confirmed by ${via} (${r.partySize} @ ${fmt12(r.time)})`);
+  emailReceipt(r, "confirmed");
   return `Thank you, ${first(r)}! You're confirmed for ${r.partySize} at ${fmt12(r.time)} tonight. See you soon.`;
 }
 
-function cancel(r: Reservation): string {
+export function cancel(r: Reservation, via = "text"): string {
   r.status = "cancelled";
-  r.history.push("Guest cancelled by text");
-  log("warn", `${r.name} cancelled. ${r.partySize}-top at ${fmt12(r.time)} is free again`);
+  r.history.push(`Guest cancelled by ${via}`);
+  log("warn", `${r.name} cancelled by ${via}. ${r.partySize}-top at ${fmt12(r.time)} is free again`);
+  emailReceipt(r, "cancelled");
   offerFreedTables();
   return `No problem, ${first(r)}. Your ${fmt12(r.time)} reservation is cancelled. Hope to see you another night!`;
 }
@@ -69,6 +72,7 @@ function modify(r: Reservation, time: string | null, partySize: number | null) {
   r.status = "confirmed";
   r.history.push(`Changed by text: ${before} → ${newParty} @ ${fmt12(newTime)}`);
   log("ai", `${r.name} moved ${before} → ${newParty} @ ${fmt12(newTime)}`);
+  emailReceipt(r, "changed", `was ${before}`);
   offerFreedTables(); // moving or shrinking a booking can free a table
   return { ok: true as const, reservation: summary(r) };
 }
@@ -90,6 +94,7 @@ function book(
     confirmation: `TXT-${Math.floor(10000 + Math.random() * 90000)}`,
     name,
     phone,
+    email: null,
     partySize,
     time,
     notes,

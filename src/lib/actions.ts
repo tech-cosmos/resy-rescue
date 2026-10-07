@@ -3,6 +3,7 @@ import { handleInbound } from "./agent";
 import { slotGrid } from "./capacity";
 import { extractInBatches, reconcile, type SkippedEmail } from "./extract";
 import { llm, MODEL } from "./llm";
+import { emailConfirmationRequest } from "./mailer";
 import { log, RESTAURANT, sendSms, state } from "./store";
 import { fmt12, todayISO } from "./time";
 import type { EmailOutcome, RebuildPhase, ResyEvent } from "./types";
@@ -79,19 +80,32 @@ function describe(event: ResyEvent | undefined, skip: SkippedEmail | undefined, 
   return { kind: "booking", label: `${event.name}, ${when}` };
 }
 
-export function textAllGuests() {
-  const targets = state().reservations.filter((r) => r.status === "pending" && !r.contacted && r.phone);
+export type Channel = "sms" | "email";
+
+/** Reach every unverified guest on the chosen channels (email is simulated: it lands in the outbox). */
+export function sendConfirmations(channels: Channel[]) {
+  const targets = state().reservations.filter((r) => r.status === "pending" && !r.contacted);
+  let texts = 0;
+  let emails = 0;
   for (const r of targets) {
-    sendSms(
-      r.phone!,
-      `Hi ${r.name.split(" ")[0]}, it's ${RESTAURANT}. Our booking system is down, but we have you for ` +
-        `${r.partySize} at ${fmt12(r.time)} tonight. Reply YES to confirm, CANCEL to cancel, or text us any changes.`,
-    );
-    r.contacted = true;
-    r.history.push("Confirmation text sent");
+    if (channels.includes("sms") && r.phone) {
+      sendSms(
+        r.phone,
+        `Hi ${r.name.split(" ")[0]}, it's ${RESTAURANT}. Our booking system is down, but we have you for ` +
+          `${r.partySize} at ${fmt12(r.time)} tonight. Reply YES to confirm, CANCEL to cancel, or text us any changes.`,
+      );
+      r.history.push("Confirmation text sent");
+      texts++;
+      r.contacted = true;
+    }
+    if (channels.includes("email") && emailConfirmationRequest(r)) {
+      r.history.push("Confirmation email sent");
+      emails++;
+      r.contacted = true;
+    }
   }
-  log("info", `Sent ${targets.length} confirmation texts`);
-  return targets.length;
+  log("info", `Sent ${[texts && `${texts} confirmation texts`, emails && `${emails} confirmation emails`].filter(Boolean).join(" and ") || "no confirmations (no contact details)"}`);
+  return { texts, emails };
 }
 
 // Scripted guest behaviour so the demo shows a realistic mix of replies.
@@ -130,6 +144,7 @@ export function snapshot() {
     reservations: s.reservations,
     messages: s.messages,
     waitlist: s.waitlist,
+    outbox: s.outbox.slice(0, 80),
     activity: s.activity.slice(0, 60),
     grid: slotGrid(s.reservations),
     rebuiltAt: s.rebuiltAt,

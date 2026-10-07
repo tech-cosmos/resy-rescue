@@ -17,11 +17,13 @@ async function post(path: string, body?: unknown): Promise<Snapshot> {
 }
 
 const REBUILDING: RebuildPhase[] = ["fetching", "reading"];
+const CHANNELS = { both: ["sms", "email"], sms: ["sms"], email: ["email"] } as const;
 
 export default function Dashboard() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [activePhone, setActivePhone] = useState<string | null>(null);
+  const [channel, setChannel] = useState<keyof typeof CHANNELS>("both");
   const rebuildingRef = useRef(false);
 
   // Poll fast while the inbox is being rebuilt so each email shows up as it's processed.
@@ -65,11 +67,11 @@ export default function Dashboard() {
     };
   }, []);
 
-  const run = async (label: string, path: string) => {
+  const run = async (label: string, path: string, body?: unknown) => {
     setBusy(label);
     if (label === "rebuild") rebuildingRef.current = true;
     try {
-      setSnap(await post(path));
+      setSnap(await post(path, body));
     } finally {
       setBusy(null);
     }
@@ -86,7 +88,7 @@ export default function Dashboard() {
     confirmed: live.filter((r) => r.status === "confirmed").length,
     awaiting: live.filter((r) => r.status === "pending" && r.contacted).length,
     untexted: live.filter((r) => r.status === "pending" && !r.contacted).length,
-    freed: snap.reservations.filter((r) => r.status === "cancelled" && r.history.some((h) => h.includes("by text"))).length,
+    freed: snap.reservations.filter((r) => r.status === "cancelled" && r.history.some((h) => /cancelled by (text|email)/.test(h))).length,
     byText: live.filter((r) => r.source === "sms-agent").length,
     rebooked: live.filter((r) => r.source === "waitlist").length,
   };
@@ -150,13 +152,23 @@ export default function Dashboard() {
           />
           <Step
             n={2}
-            title="Text every guest"
-            detail={stats.untexted ? `${stats.untexted} guests haven't been contacted` : "Ask each guest to reply YES, CANCEL, or a change"}
+            title="Contact every guest"
+            detail={stats.untexted ? `${stats.untexted} guests haven't been contacted` : "Ask each guest to confirm, cancel, or tell us a change"}
             done={!!snap.rebuiltAt && stats.untexted === 0}
             action={`Send ${stats.untexted || ""} confirmations`.replace("  ", " ")}
             disabled={!!busy || rebuilding || !snap.rebuiltAt || stats.untexted === 0}
-            onClick={() => run("confirm", "/api/confirm")}
-          />
+            onClick={() => run("confirm", "/api/confirm", { channels: CHANNELS[channel] })}
+          >
+            <select
+              value={channel}
+              onChange={(e) => setChannel(e.target.value as keyof typeof CHANNELS)}
+              className="w-full rounded-lg border border-stone-200 bg-white px-2 py-1.5 text-sm"
+            >
+              <option value="both">Text + email</option>
+              <option value="sms">Text only</option>
+              <option value="email">Email only (simulated)</option>
+            </select>
+          </Step>
           <Step
             n={3}
             title="Guests reply"
@@ -202,6 +214,7 @@ export default function Dashboard() {
           </div>
           <div className="grid content-start gap-5 lg:col-span-2 lg:grid-cols-2 xl:col-span-1 xl:grid-cols-1">
             <Phone snap={snap} activePhone={activePhone} setActivePhone={setActivePhone} onSnap={setSnap} />
+            <Outbox emails={snap.outbox} />
             <Activity items={snap.activity} />
           </div>
         </div>
@@ -250,6 +263,7 @@ function Step(props: {
   progress?: number;
   disabled: boolean;
   onClick: () => void;
+  children?: React.ReactNode;
 }) {
   const active = props.progress !== undefined;
   return (
@@ -277,6 +291,7 @@ function Step(props: {
           )}
         </div>
       </div>
+      {props.children}
       <button
         onClick={props.onClick}
         disabled={props.disabled}
@@ -715,6 +730,52 @@ function EmailDot({ outcome, current }: { outcome: EmailOutcome | null | undefin
         outcome.kind
       ];
   return <span className={`h-2 w-2 shrink-0 rounded-full ${color}`} />;
+}
+
+function Outbox({ emails }: { emails: Snapshot["outbox"] }) {
+  const [open, setOpen] = useState<string | null>(null);
+  return (
+    <section className="rounded-xl border border-stone-200 bg-white p-4">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="flex items-center gap-2 font-semibold">
+          <GmailMark className="h-4 w-4" /> Sent emails
+        </h2>
+        <span className="text-xs text-stone-500">Simulated · not actually sent</span>
+      </div>
+      {emails.length === 0 ? (
+        <p className="text-sm text-stone-400">Nothing sent yet.</p>
+      ) : (
+        <ul className="max-h-72 divide-y divide-stone-100 overflow-y-auto text-sm">
+          {emails.map((e) => (
+            <li key={e.id}>
+              <button onClick={() => setOpen(open === e.id ? null : e.id)} className="block w-full py-2 text-left hover:bg-stone-50">
+                <div className="truncate text-xs text-stone-500">To: {e.to}</div>
+                <div className="truncate">{e.subject}</div>
+              </button>
+              {open === e.id && <EmailBody body={e.body} />}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/** Email text with its Confirm / Cancel links made clickable, so the simulated email can be acted on. */
+function EmailBody({ body }: { body: string }) {
+  return (
+    <pre className="mb-2 whitespace-pre-wrap rounded-lg bg-stone-50 px-3 py-2 font-mono text-[11px] leading-relaxed text-stone-600">
+      {body.split(/(https?:\/\/\S+)/).map((part, i) =>
+        /^https?:\/\//.test(part) ? (
+          <a key={i} href={part} target="_blank" rel="noreferrer" className="text-blue-600 underline">
+            {part.includes("a=cancel") ? "Cancel reservation" : "Confirm reservation"}
+          </a>
+        ) : (
+          part
+        ),
+      )}
+    </pre>
+  );
 }
 
 const DOT = { info: "bg-stone-400", good: "bg-emerald-500", warn: "bg-amber-500", ai: "bg-violet-500" };

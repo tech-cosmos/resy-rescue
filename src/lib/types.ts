@@ -5,6 +5,7 @@ export type Reservation = {
   confirmation: string;
   name: string;
   phone: string | null;
+  email: string | null;
   partySize: number;
   time: string; // "HH:MM" 24h
   notes: string | null;
@@ -34,6 +35,7 @@ export type ResyEvent = {
   confirmation: string;
   name: string;
   phone: string | null;
+  email: string | null;
   partySize: number | null;
   date: string | null; // YYYY-MM-DD
   time: string | null; // HH:MM
@@ -75,4 +77,14 @@ export type WaitlistEntry = {
   time: string; // "HH:MM" 24h
   status: "waiting" | "offered" | "booked";
   at: number;
+};
+
+/** A simulated outbound email (nothing is actually sent). Shown in the dashboard's outbox. */
+export type OutboundEmail = {
+  id: string;
+  to: string;
+  subject: string;
+  body: string;
+  at: number;
+  reservationId: string | null;
 };

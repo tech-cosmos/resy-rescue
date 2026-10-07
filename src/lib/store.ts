@@ -1,4 +1,4 @@
-import type { ActivityItem, InboxEmail, RebuildProgress, Reservation, SmsMessage, WaitlistEntry } from "./types";
+import type { ActivityItem, InboxEmail, OutboundEmail, RebuildProgress, Reservation, SmsMessage, WaitlistEntry } from "./types";
 
 // In-memory state for the demo. Lives on globalThis so it survives dev hot reloads.
 // Single-process only: swap for a real database before deploying anywhere serverless.
@@ -7,6 +7,8 @@ export type State = {
   reservations: Reservation[];
   messages: SmsMessage[];
   waitlist: WaitlistEntry[];
+  outbox: OutboundEmail[];
+  origin: string | null; // base URL for links in emails, captured from incoming requests
   activity: ActivityItem[];
   rebuiltAt: number | null;
   extractedBy: string | null;
@@ -25,6 +27,8 @@ export function freshState(): State {
     reservations: [],
     messages: [],
     waitlist: [],
+    outbox: [],
+    origin: null,
     activity: [],
     rebuiltAt: null,
     extractedBy: null,
@@ -52,6 +56,11 @@ export function log(kind: ActivityItem["kind"], text: string) {
 
 export function sendSms(phone: string, body: string) {
   state().messages.push({ id: uid("m"), phone, direction: "out", body, at: Date.now() });
+}
+
+/** Simulated email: lands in the dashboard outbox, nothing is actually sent. */
+export function sendEmail(to: string, subject: string, body: string, reservationId: string | null = null) {
+  state().outbox.unshift({ id: uid("e"), to, subject, body, at: Date.now(), reservationId });
 }
 
 export function recordInbound(phone: string, body: string) {

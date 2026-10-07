@@ -8,6 +8,7 @@ const EventSchema = z.object({
   confirmation: z.string(),
   name: z.string(),
   phone: z.string().nullable(),
+  email: z.string().nullable(),
   partySize: z.number().int().nullable(),
   date: z.string().nullable(),
   time: z.string().nullable(),
@@ -72,6 +73,7 @@ async function extractWithLLM(inbox: InboxEmail[], now: Date): Promise<Extractio
           "For every email that creates, modifies, or cancels a reservation, emit one event. This includes informal emails " +
           "forwarded by guests that mention a booking (treat those as type 'new'). Skip newsletters and anything else, listing them in 'skipped'.\n" +
           `Today is ${now.toDateString()} (${todayISO(now)}). Output dates as YYYY-MM-DD and times as 24h HH:MM. ` +
+          "For the guest's email use the Email field, or the sender's address when the guest wrote the email themselves. " +
           "For modified events, use the UPDATED time and party size. Use null for unknown fields. Respond with JSON only.",
       },
       { role: "user", content: emails },
@@ -121,6 +123,7 @@ export function extractWithRules(inbox: InboxEmail[]): ExtractionResult {
       confirmation,
       name,
       phone: field(email.body, "Phone"),
+      email: field(email.body, "Email"),
       partySize: party ? Number(party) : null,
       date,
       time: time ? parseTime(time) : null,
@@ -145,6 +148,7 @@ export function reconcile(events: ResyEvent[], now = new Date()): Reservation[] 
         confirmation: e.confirmation,
         name: e.name,
         phone: normalizePhone(e.phone),
+        email: e.email?.toLowerCase() ?? null,
         partySize: e.partySize ?? 2,
         time: e.time ?? "19:00",
         notes: e.notes,
@@ -163,6 +167,7 @@ export function reconcile(events: ResyEvent[], now = new Date()): Reservation[] 
       if (e.time) existing.time = e.time;
       if (e.partySize) existing.partySize = e.partySize;
       if (e.phone) existing.phone = normalizePhone(e.phone) ?? existing.phone;
+      if (e.email) existing.email = e.email.toLowerCase();
       existing.history.push(`Modified via Resy (email #${e.emailIndex})`);
     }
   }
