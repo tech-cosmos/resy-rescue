@@ -1,36 +1,44 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Resy Rescue
 
-## Getting Started
+**Challenge:** Resy is down on a busy afternoon. How do you reach guests, verify availability, and confirm tonight's bookings?
 
-First, run the development server:
+**Answer:** The data isn't gone, it's scattered. Resy Rescue rebuilds tonight's book from the restaurant's inbox, texts every guest to confirm, and runs an AI host over SMS that checks real table availability before it books, moves, or cancels anything.
+
+## Run it
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cp .env.example .env.local   # add OPENROUTER_API_KEY (optional)
+npm install
+npm run dev                  # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Without a key the app runs in **rules mode**: Resy-format emails and simple texts still work, but free-form emails get flagged for a human.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Demo script (~2 min)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. **"It's 2pm, Resy is down."** The book is empty.
+2. **Rebuild book.** 30 emails become 21 bookings, with cancellations and modifications applied and tomorrow's bookings filtered out. With AI on, the messy forwarded "Fwd: tonight" email from a guest is parsed too.
+3. **Send confirmations.** Every guest gets a text.
+4. **Simulate guest replies.** Replies come in: YES confirms, CANCEL frees a table, "push to 8:30?" moves the booking, and the availability grid updates live.
+5. **+ Text as new guest:** "table for 4 at 8 tonight?" 8pm is full, so the AI host offers 7:30, gets a name, and books it.
 
-## Learn More
+## How it works
 
-To learn more about Next.js, take a look at the following resources:
+| Piece | File |
+|---|---|
+| Seed inbox (Resy notifications, noise, a messy guest forward) | `src/data/inbox.ts` |
+| Email → events (LLM JSON-schema extraction, regex fallback) → reconciled book | `src/lib/extract.ts` |
+| Tables, turn times, greedy seating, open slots, alternatives | `src/lib/capacity.ts` |
+| SMS handling: YES/CANCEL fast path, then the AI host with tools | `src/lib/agent.ts` |
+| OpenRouter client (OpenAI-compatible) | `src/lib/llm.ts` |
+| In-memory state (single process, demo only) | `src/lib/store.ts` |
+| API: `/api/rebuild`, `/api/confirm`, `/api/simulate`, `/api/sms`, `/api/state`, `/api/reset` | `src/app/api/*` |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+AI host tools: `get_my_reservation`, `check_availability`, `book_table`, `modify_reservation`, `confirm_reservation`, `cancel_reservation`.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Going real
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- **SMS:** point a Twilio webhook at `/api/sms` (map `From`/`Body`) and replace `sendSms` in `store.ts` with a Twilio send.
+- **Inbox:** swap `buildInbox()` for a Gmail API query (`from:resy.com newer_than:7d`).
+- **State:** in-memory state won't survive serverless instances. Use Postgres or Redis before deploying.
+- **Next:** voice AI for no-replies, waitlist auto-fill for freed tables, reconciliation export for when Resy comes back.
