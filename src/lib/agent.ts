@@ -1,12 +1,14 @@
 import type OpenAI from "openai";
-import type { Reservation } from "./types";
+import type { Reservation, WaitlistEntry } from "./types";
 import { llm, MODEL } from "./llm";
+import { emailReceipt } from "./mailer";
 import { alternatives, canSeat, FIRST_SEATING, LAST_SEATING } from "./capacity";
 import { findActiveByPhone, log, recordInbound, RESTAURANT, sendSms, state, uid } from "./store";
 import { findTimeInText, fmt12, normalizePhone, parseTime } from "./time";
 
 const YES = /^\s*(y|yes|yep|yeah|yup|confirm(ed)?|see you|we'?ll be there|👍)\b/i;
 const CANCEL = /^\s*(cancel|can'?t make it|no longer)/i;
+const WAITLIST = /\b(wait\s*-?\s*list|notify me|let me know if)/i;
 
 /** Entry point for every inbound text. Handles YES/CANCEL directly; everything else goes to the AI host. */
 export async function handleInbound(rawPhone: string, body: string): Promise<string> {
@@ -17,7 +19,10 @@ export async function handleInbound(rawPhone: string, body: string): Promise<str
   let reply: string;
   // Fast path only for plain replies; "yes but we're 3 now" needs the agent.
   const plain = !/\d|\bbut\b|\bchange\b|\binstead\b/i.test(body);
-  if (res && plain && YES.test(body)) {
+  const offer = res ? undefined : openOffer(phone);
+  if (offer && plain && YES.test(body)) {
+    reply = claimOffer(offer);
+  } else if (res && plain && YES.test(body)) {
     reply = confirm(res);
   } else if (res && plain && CANCEL.test(body)) {
     reply = cancel(res);
@@ -38,17 +43,20 @@ export async function handleInbound(rawPhone: string, body: string): Promise<str
 
 // ---- actions shared by the fast path, the rules fallback, and the AI tools ----
 
-function confirm(r: Reservation): string {
+export function confirm(r: Reservation, via = "text"): string {
   r.status = "confirmed";
-  r.history.push("Guest confirmed by text");
-  log("good", `${r.name} confirmed (${r.partySize} @ ${fmt12(r.time)})`);
+  r.history.push(`Guest confirmed by ${via}`);
+  log("good", `${r.name} confirmed by ${via} (${r.partySize} @ ${fmt12(r.time)})`);
+  emailReceipt(r, "confirmed");
   return `Thank you, ${first(r)}! You're confirmed for ${r.partySize} at ${fmt12(r.time)} tonight. See you soon.`;
 }
 
-function cancel(r: Reservation): string {
+export function cancel(r: Reservation, via = "text"): string {
   r.status = "cancelled";
-  r.history.push("Guest cancelled by text");
-  log("warn", `${r.name} cancelled. ${r.partySize}-top at ${fmt12(r.time)} is free again`);
+  r.history.push(`Guest cancelled by ${via}`);
+  log("warn", `${r.name} cancelled by ${via}. ${r.partySize}-top at ${fmt12(r.time)} is free again`);
+  emailReceipt(r, "cancelled");
+  offerFreedTables();
   return `No problem, ${first(r)}. Your ${fmt12(r.time)} reservation is cancelled. Hope to see you another night!`;
 }
 
@@ -64,10 +72,19 @@ function modify(r: Reservation, time: string | null, partySize: number | null) {
   r.status = "confirmed";
   r.history.push(`Changed by text: ${before} → ${newParty} @ ${fmt12(newTime)}`);
   log("ai", `${r.name} moved ${before} → ${newParty} @ ${fmt12(newTime)}`);
+  emailReceipt(r, "changed", `was ${before}`);
+  offerFreedTables(); // moving or shrinking a booking can free a table
   return { ok: true as const, reservation: summary(r) };
 }
 
-function book(phone: string, name: string, partySize: number, time: string, notes: string | null) {
+function book(
+  phone: string,
+  name: string,
+  partySize: number,
+  time: string,
+  notes: string | null,
+  source: Reservation["source"] = "sms-agent",
+) {
   const list = state().reservations;
   if (!canSeat(list, partySize, time)) {
     return { ok: false as const, alternatives: alternatives(list, partySize, time).map(fmt12) };
@@ -77,18 +94,66 @@ function book(phone: string, name: string, partySize: number, time: string, note
     confirmation: `TXT-${Math.floor(10000 + Math.random() * 90000)}`,
     name,
     phone,
+    email: null,
     partySize,
     time,
     notes,
     status: "confirmed",
     contacted: true,
-    source: "sms-agent",
-    history: ["Booked by AI host over text"],
+    source,
+    history: [source === "waitlist" ? "Rebooked from the waitlist into a freed table" : "Booked by AI host over text"],
   };
   list.push(r);
   list.sort((a, b) => a.time.localeCompare(b.time));
-  log("ai", `New booking by text: ${name}, ${partySize} @ ${fmt12(time)}`);
+  for (const w of state().waitlist) if (w.phone === phone && w.status !== "booked") w.status = "booked";
+  log(source === "waitlist" ? "good" : "ai", `${source === "waitlist" ? "Rebooked from waitlist" : "New booking by text"}: ${name}, ${partySize} @ ${fmt12(time)}`);
   return { ok: true as const, reservation: summary(r) };
+}
+
+// ---- waitlist: guests who wanted a full time get offered freed tables, first YES wins ----
+
+function joinWaitlist(phone: string, name: string | null, partySize: number, time: string) {
+  const list = state().waitlist;
+  let w = list.find((x) => x.phone === phone && x.status !== "booked");
+  if (w) Object.assign(w, { name: name ?? w.name, partySize, time, status: "waiting" });
+  else list.push((w = { id: uid("w"), phone, name, partySize, time, status: "waiting", at: Date.now() }));
+  log("info", `${w.name ?? phone} joined the waitlist for ${partySize} at ${fmt12(time)}`);
+  return { ok: true as const, waitlist: { partySize, time: fmt12(time) } };
+}
+
+const openOffer = (phone: string): WaitlistEntry | undefined =>
+  state().waitlist.find((w) => w.phone === phone && w.status === "offered");
+
+/** Text every waitlisted party that can now be seated. Called whenever a table frees up. */
+function offerFreedTables() {
+  for (const w of state().waitlist) {
+    if (w.status !== "waiting" || !canSeat(state().reservations, w.partySize, w.time)) continue;
+    w.status = "offered";
+    const hi = w.name ? `Hi ${w.name.split(" ")[0]}! ` : "Hi! ";
+    sendSms(
+      w.phone,
+      `${hi}Good news from ${RESTAURANT}: a table for ${w.partySize} at ${fmt12(w.time)} tonight just opened up. ` +
+        `Reply YES to grab it (first to reply gets it).`,
+    );
+    log("info", `Offered freed ${fmt12(w.time)} table to waitlisted ${w.name ?? w.phone} (party of ${w.partySize})`);
+  }
+}
+
+function claimOffer(w: WaitlistEntry): string {
+  const name = w.name ?? `Guest ${w.phone.slice(-4)}`;
+  const out = book(w.phone, name, w.partySize, w.time, null, "waitlist");
+  if (out.ok) {
+    // Anyone else offered this table who can no longer be seated goes back in line.
+    for (const other of state().waitlist) {
+      if (other.status !== "offered" || canSeat(state().reservations, other.partySize, other.time)) continue;
+      other.status = "waiting";
+      sendSms(other.phone, `That ${fmt12(other.time)} table has just been taken, sorry! You're still on the waitlist.`);
+    }
+    return `You're in! ${name}, ${w.partySize} at ${fmt12(w.time)} tonight. See you soon.`;
+  }
+  w.status = "waiting";
+  log("info", `${name} replied for the ${fmt12(w.time)} table but it was already taken; still on the waitlist`);
+  return `So sorry, that table was just taken. You're still on the waitlist and we'll text you if another opens up.`;
 }
 
 const first = (r: Reservation) => r.name.split(" ")[0];
@@ -120,6 +185,12 @@ const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   }),
   fn("confirm_reservation", "Mark the guest's existing reservation as confirmed.", {}),
   fn("cancel_reservation", "Cancel the guest's existing reservation.", {}),
+  fn("join_waitlist", "Put the guest on tonight's waitlist for a full time. We text them automatically if a table opens up.", {
+    party_size: { type: "integer", minimum: 1, maximum: 6 },
+    time: { type: "string", description: "24h HH:MM they want" },
+    name: { type: "string", description: "Guest's name, if known" },
+  }, ["party_size", "time"]),
+  fn("accept_waitlist_offer", "Book the freed table we offered this guest from the waitlist (when they say yes to the offer).", {}),
 ];
 
 function fn(name: string, description: string, properties: Record<string, unknown>, required: string[] = []) {
@@ -134,8 +205,11 @@ function runTool(phone: string, name: string, args: Record<string, unknown>): un
   const time = typeof args.time === "string" ? parseTime(args.time) : null;
   const party = typeof args.party_size === "number" ? args.party_size : null;
   switch (name) {
-    case "get_my_reservation":
-      return r ? summary(r) : { found: false };
+    case "get_my_reservation": {
+      if (r) return summary(r);
+      const w = state().waitlist.find((x) => x.phone === phone && x.status !== "booked");
+      return w ? { found: false, waitlist: { partySize: w.partySize, time: fmt12(w.time), status: w.status } } : { found: false };
+    }
     case "check_availability":
       if (!time || !party) return { error: "need party_size and time" };
       return canSeat(state().reservations, party, time)
@@ -156,6 +230,17 @@ function runTool(phone: string, name: string, args: Record<string, unknown>): un
       if (!r) return { error: "no reservation found for this phone number" };
       cancel(r);
       return { ok: true };
+    case "join_waitlist":
+      if (r) return { error: "This guest already has a reservation tonight.", existing: summary(r) };
+      if (!time || !party) return { error: "need party_size and time" };
+      if (canSeat(state().reservations, party, time)) return { error: "That time is open right now; book it with book_table instead." };
+      return joinWaitlist(phone, typeof args.name === "string" ? args.name : null, party, time);
+    case "accept_waitlist_offer": {
+      const offer = openOffer(phone);
+      if (!offer) return { error: "no open waitlist offer for this guest" };
+      const message = claimOffer(offer);
+      return { ok: !!findActiveByPhone(phone), message };
+    }
     default:
       return { error: `unknown tool ${name}` };
   }
@@ -172,7 +257,9 @@ async function runAgent(phone: string): Promise<string> {
         `${new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}. ` +
         `Seatings run ${fmt12(FIRST_SEATING)}–${fmt12(LAST_SEATING)}, parties of 1–6 (larger groups: ask them to call). ` +
         `The guest's phone is ${phone}. Always check the guest's existing reservation and real availability with tools before ` +
-        `promising anything. If a time is full, offer the alternatives returned. To book someone new you need their name. ` +
+        `promising anything. If a time is full, offer the alternatives returned, and offer to add them to the waitlist for the ` +
+        `time they wanted (join_waitlist): we text them automatically if a table frees up. If they say yes to a waitlist offer ` +
+        `we sent, call accept_waitlist_offer. To book someone new you need their name. ` +
         `Replies are SMS: warm, one to three short sentences, no markdown.`,
     },
     ...thread.map((m) => ({ role: m.direction === "in" ? ("user" as const) : ("assistant" as const), content: m.body })),
@@ -222,13 +309,22 @@ function ruleBasedReply(phone: string, body: string): string {
     time ??= timeOf(text);
     party ??= partyOf(text);
   }
+  const NAME = /(?:this is|i'?m|name is|it'?s|under)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/;
   const name =
-    body.match(/(?:this is|i'?m|name is|it'?s|under)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/)?.[1] ??
-    (/what name/i.test(lastOut) ? body.trim().replace(/[.!]$/, "") : undefined);
+    body.match(NAME)?.[1] ??
+    (/what name/i.test(lastOut) ? body.trim().replace(/[.!]$/, "") : undefined) ??
+    inbound.map((text) => text.match(NAME)?.[1]).findLast(Boolean); // e.g. "this is Sam Lee" in an earlier text
   if (!time || !party) return `Hi! This is ${RESTAURANT}. We'd love to have you tonight. How many people, and what time?`;
+  if (WAITLIST.test(body) && !canSeat(state().reservations, party, time)) {
+    joinWaitlist(phone, name ?? null, party, time);
+    return `You're on the waitlist for ${party} at ${fmt12(time)}. We'll text you the moment a table opens up.`;
+  }
   if (!canSeat(state().reservations, party, time)) {
     const alts = alternatives(state().reservations, party, time).map(fmt12);
-    return `Sorry, ${fmt12(time)} is full for ${party}. We can do ${alts.join(", ") || "another night"}.`;
+    return (
+      `Sorry, ${fmt12(time)} is full for ${party}. We can do ${alts.join(", ") || "another night"}, ` +
+      `or reply WAITLIST and we'll text you if ${fmt12(time)} opens up.`
+    );
   }
   if (!name) return `Good news: ${fmt12(time)} for ${party} is available! What name should I put it under?`;
   const out = book(phone, name, party, time, null);

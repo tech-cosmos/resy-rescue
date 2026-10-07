@@ -51,6 +51,8 @@ const SEEDS: Seed[] = [
   { kind: "cancelled", name: "Ryan Walsh", conf: "RSY-48377", time: "8:30 PM", party: 2 },
 ];
 
+const emailFor = (name: string) => `${name.toLowerCase().replace(/[^a-z]+/g, ".")}@example.com`;
+
 export function buildInbox(now = new Date()): InboxEmail[] {
   const today = longDate(now);
   const tomorrowDate = new Date(now);
@@ -69,6 +71,7 @@ export function buildInbox(now = new Date()): InboxEmail[] {
             `You have a new reservation.`,
             `Guest: ${s.name}`,
             `Phone: ${s.phone}`,
+            `Email: ${emailFor(s.name)}`,
             `Party Size: ${s.party}`,
             `Date: ${date}`,
             `Time: ${s.time}`,
