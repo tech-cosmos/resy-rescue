@@ -1,5 +1,7 @@
 # Resy Rescue
 
+**Live demo:** https://seattle-snowy.vercel.app
+
 **Challenge:** Resy is down on a busy afternoon. How do you reach guests, verify availability, and confirm tonight's bookings?
 
 **Answer:** The data isn't gone, it's scattered. Resy Rescue rebuilds tonight's book from the restaurant's inbox, texts every guest to confirm, and runs an AI host over SMS that checks real table availability before it books, moves, or cancels anything.
